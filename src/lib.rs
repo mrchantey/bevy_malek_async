@@ -46,9 +46,7 @@ where
             && let Some(wc) = async_ecs_world_access.lock().unwrap().as_mut()
         {
             let out;
-            let world_id;
             unsafe {
-                world_id = wc.world().id();
                 // SAFETY: This is safe because we have a mutex around our world cell, so only one thing can have access to it at a time.
                 let mut system_state: SystemState<P> = SystemState::new(wc.world_mut());
                 {
@@ -91,14 +89,13 @@ fn run_async_ecs_accesses(world: &mut World) {
             // where we do use it, so the lifetime doesn't get propagated anywhere.
             .replace(std::mem::transmute(world.as_unsafe_world_cell()));
     }
-    let mut num_wakers = 0;
     if let Some(wakers) = ASYNC_ECS_WAKER_LIST
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
         .remove(&world_id)
     {
-        num_wakers = wakers.len();
+        let num_wakers = wakers.len();
         let wg = WaitGroup::new();
         {
             let mut tickets = world
