@@ -1,0 +1,15 @@
+[package]
+name = "bevy_malek_async"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_app = "0.17.2"
+bevy_platform = "0.17.2"
+bevy_ecs = "0.17.2"
+crossbeam = "0.8.4"
+
+[dev-dependencies]
+tokio = { version = "1.48.0", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+bevy = "0.17.2"

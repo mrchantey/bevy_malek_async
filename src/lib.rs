@@ -1,19 +1,17 @@
-use bevy::app::{App, Plugin};
-use bevy::platform::collections::HashMap;
-use bevy::prelude::*;
-use bevy_ecs::world::WorldId;
-use bevy_ecs::world::unsafe_world_cell::UnsafeWorldCell;
+use bevy_app::{App, Plugin, PostStartup, PostUpdate, PreStartup, PreUpdate, Startup, Update};
 use bevy_ecs::{
+    prelude::{FromWorld, Resource},
     system::{SystemParam, SystemState},
+    world::{World, WorldId, unsafe_world_cell::UnsafeWorldCell},
 };
-use std::marker::PhantomData;
-use std::ops::AddAssign;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
-use std::thread;
-use std::time::Duration;
+use bevy_platform::collections::HashMap;
+use crossbeam::sync::WaitGroup;
+use std::{
+    marker::PhantomData,
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+    task::{Context, Poll, Waker},
+};
 
 static ASYNC_ECS_WORLD_ACCESS: OnceLock<Mutex<Option<UnsafeWorldCell>>> = OnceLock::new();
 static ASYNC_ECS_WAKER_LIST: OnceLock<Mutex<HashMap<WorldId, Vec<Waker>>>> = OnceLock::new();
@@ -23,7 +21,8 @@ where
     P: SystemParam + 'static,
     for<'w, 's> Func: FnOnce(P::Item<'w, 's>) -> Out,
 {
-    SystemParamThing::<P, Func, Out>(PhantomData::<P>, PhantomData, Some(ecs_access), world_id).await
+    SystemParamThing::<P, Func, Out>(PhantomData::<P>, PhantomData, Some(ecs_access), world_id)
+        .await
 }
 
 struct SystemParamThing<'a, 'b, P: SystemParam + 'static, Func, Out>(
@@ -59,7 +58,12 @@ where
                     out = self.as_mut().2.take().unwrap()(state);
                 }
                 system_state.apply(wc.world_mut());
-                wc.get_resource_mut::<AsyncEcsCounter>().unwrap().0.fetch_add(1, Ordering::Relaxed);
+                wc.get_resource_mut::<AsyncEcsCounter>()
+                    .unwrap()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pop();
             }
             Poll::Ready(out)
         } else {
@@ -77,8 +81,6 @@ where
 }
 
 fn run_async_ecs_accesses(world: &mut World) {
-    let ecs_counter = world.get_resource::<AsyncEcsCounter>().unwrap().0.clone();
-    ecs_counter.store(0, Ordering::Relaxed);
     let world_id = world.id();
     unsafe {
         ASYNC_ECS_WORLD_ACCESS
@@ -97,12 +99,25 @@ fn run_async_ecs_accesses(world: &mut World) {
         .remove(&world_id)
     {
         num_wakers = wakers.len();
+        let wg = WaitGroup::new();
+        {
+            let mut tickets = world
+                .get_resource::<AsyncEcsCounter>()
+                .unwrap()
+                .0
+                .lock()
+                .unwrap();
+            tickets.clear();
+            for _ in 0..num_wakers {
+                tickets.push(wg.clone());
+            }
+        }
         for waker in wakers {
             waker.wake();
         }
-    }
-    while num_wakers != ecs_counter.load(Ordering::Relaxed) {
-        thread::yield_now();
+        if num_wakers > 0 {
+            wg.wait();
+        }
     }
     ASYNC_ECS_WORLD_ACCESS
         .get()
@@ -136,5 +151,10 @@ impl FromWorld for WorldIdRes {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct AsyncEcsCounter(pub Arc<AtomicUsize>);
+#[derive(Resource)]
+pub struct AsyncEcsCounter(pub Arc<Mutex<Vec<WaitGroup>>>);
+impl Default for AsyncEcsCounter {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
+}

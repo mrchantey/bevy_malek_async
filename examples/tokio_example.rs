@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy_ecs::world::WorldId;
-use bevy_mod_async_2::{async_access, AsyncPlugin};
+use bevy_malek_async::{AsyncPlugin, async_access};
 
 fn main() {
     App::new()
@@ -44,7 +44,9 @@ fn spawn_tokio_web_request(world: &World) {
         .expect("spawn tokio task thread");
 }
 
-async fn fetch_example_com(world_id: WorldId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn fetch_example_com(
+    world_id: WorldId,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .user_agent("bevy-tokio-example/0.1")
         .build()?;
@@ -52,14 +54,11 @@ async fn fetch_example_com(world_id: WorldId) -> Result<(), Box<dyn std::error::
     let resp = client.get("https://example.com/").send().await?;
     let status = resp.status();
     let body = resp.text().await?;
-    println!(
-        "Fetched example.com: status={status}, bytes={}",
-        body.len()
-    );
+    println!("Fetched example.com: status={status}, bytes={}", body.len());
     async_access::<ResMut<MyResource>, _, _>(world_id, |mut my_resource: ResMut<MyResource>| {
         my_resource.0 = body;
-    }).await;
-
+    })
+    .await;
 
     Ok(())
 }
