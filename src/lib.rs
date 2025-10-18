@@ -79,6 +79,7 @@ where
 }
 
 fn run_async_ecs_accesses(world: &mut World) {
+    let tickets = world.get_resource::<AsyncEcsCounter>().unwrap().0.clone();
     let world_id = world.id();
     unsafe {
         ASYNC_ECS_WORLD_ACCESS
@@ -89,32 +90,40 @@ fn run_async_ecs_accesses(world: &mut World) {
             // where we do use it, so the lifetime doesn't get propagated anywhere.
             .replace(std::mem::transmute(world.as_unsafe_world_cell()));
     }
-    if let Some(wakers) = ASYNC_ECS_WAKER_LIST
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap()
-        .remove(&world_id)
-    {
-        let num_wakers = wakers.len();
-        let wg = WaitGroup::new();
+    let awa = || -> Option<()> {
+        if let Some(wakers) = ASYNC_ECS_WAKER_LIST
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock().ok()?
+            .remove(&world_id)
         {
-            let mut tickets = world
-                .get_resource::<AsyncEcsCounter>()
-                .unwrap()
-                .0
-                .lock()
-                .unwrap();
-            tickets.clear();
-            for _ in 0..num_wakers {
-                tickets.push(wg.clone());
+            let num_wakers = wakers.len();
+            let wg = WaitGroup::new();
+            {
+                let mut tickets = tickets.lock().ok()?;
+                tickets.clear();
+                for _ in 0..num_wakers {
+                    tickets.push(wg.clone());
+                }
+            }
+            for waker in wakers {
+                waker.wake();
+            }
+            if num_wakers > 0 {
+                wg.wait();
             }
         }
-        for waker in wakers {
-            waker.wake();
+        Some(())
+    };
+    if let None = awa() {
+        if let Some(awa) = ASYNC_ECS_WORLD_ACCESS.get() {
+            match awa.try_lock() {
+                Ok(mut thing) => {
+                    thing.take();
+                }
+                Err(_) => {}
+            }
         }
-        if num_wakers > 0 {
-            wg.wait();
-        }
+        panic!("ASYNC_ECS_WAKER_LIST from crate bevy_malek_async was poisoned");
     }
     ASYNC_ECS_WORLD_ACCESS
         .get()
