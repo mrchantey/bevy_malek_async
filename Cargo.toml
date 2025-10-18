@@ -2,6 +2,8 @@
 name = "bevy_malek_async"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
+authors = ["pocmalek@gmail.com"]
 
 [dependencies]
 bevy_app = "0.17.2"
