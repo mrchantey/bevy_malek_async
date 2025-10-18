@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 readme = "README.md"
 authors = ["pocmalek@gmail.com"]
-license = "MIT or APACHE 2.0"
+license = "MIT OR Apache-2.0"
 description = "async runtime agnostic access to the bevy ecs"
 
 [dependencies]
