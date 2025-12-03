@@ -914,12 +914,13 @@ dependencies = [
 
 [[package]]
 name = "bevy_malek_async"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "bevy_app",
  "bevy_ecs",
  "bevy_platform",
+ "concurrent-queue",
  "crossbeam",
  "reqwest",
  "tokio",

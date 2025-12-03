@@ -1,13 +1,13 @@
 use bevy::prelude::*;
 use bevy_ecs::world::WorldId;
-use bevy_malek_async::{AsyncPlugin, async_access};
+use bevy_malek_async::{AsyncEcsPlugin, CreateEcsTask};
 
 fn main() {
     App::new()
         // Keep Bevy minimal to avoid extra overhead
         .add_plugins(MinimalPlugins)
         .init_resource::<MyResource>()
-        .add_plugins(AsyncPlugin)
+        .add_plugins(AsyncEcsPlugin)
         // Spawn the Tokio web request from a Startup system
         .add_systems(Startup, spawn_tokio_web_request)
         .add_systems(Update, print_resource)
@@ -21,8 +21,7 @@ fn print_resource(mut last: Local<String>, res: ResMut<MyResource>) {
     }
 }
 
-fn spawn_tokio_web_request(world: &World) {
-    let world_id = world.id();
+fn spawn_tokio_web_request(world_id: WorldId) {
     println!("Starting Tokio web request in background task...");
 
     // Run the async task on its own OS thread with a dedicated Tokio runtime
@@ -55,10 +54,12 @@ async fn fetch_example_com(
     let status = resp.status();
     let body = resp.text().await?;
     println!("Fetched example.com: status={status}, bytes={}", body.len());
-    async_access::<ResMut<MyResource>, _, _>(world_id, |mut my_resource: ResMut<MyResource>| {
-        my_resource.0 = body;
-    })
-    .await;
+    world_id
+        .ecs_task::<ResMut<MyResource>>()
+        .run_system(Update, |mut my_resource| {
+            my_resource.0 = body;
+        })
+        .await;
 
     Ok(())
 }
