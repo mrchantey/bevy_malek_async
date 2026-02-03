@@ -17,9 +17,9 @@ use concurrent_queue::ConcurrentQueue;
 use core::any::TypeId;
 use core::marker::PhantomData;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
-use std::thread;
+use crossbeam::sync::WaitGroup;
 
 pub struct AsyncEcsPlugin;
 
@@ -45,10 +45,14 @@ impl bevy_app::Plugin for AsyncEcsPlugin {
             FixedLast.intern(),
         ] {
             app.add_systems(awa, move |world: &mut World| {
-                GLOBAL_WAKE_REGISTRY.wait(awa, world);
+                run_async_ecs_on_schedule(awa, world);
             });
         }
     }
+}
+
+pub fn run_async_ecs_on_schedule(schedule: InternedScheduleLabel, world: &mut World) {
+    GLOBAL_WAKE_REGISTRY.wait(schedule, world);
 }
 
 /// Keyed queues is a combination of a hashmap and a concurrent queue which is useful because it
@@ -118,8 +122,8 @@ pub(crate) static GLOBAL_WAKE_REGISTRY: WakeRegistry = WakeRegistry(OnceLock::ne
 
 /// Acts as a barrier that is waited on in the `wait` call, and once the `AtomicI64` reaches 0 the
 /// thread that `wait` was called on gets woken up and resumes.
-#[derive(bevy_ecs::prelude::Resource, Clone)]
-pub(crate) struct WakeParkBarrier(thread::Thread, Arc<AtomicI64>);
+#[derive(bevy_ecs::prelude::Resource, Default, Clone)]
+pub(crate) struct WakeParkBarrier(Arc<Mutex<HashMap<AsyncTaskId, WaitGroup>>>);
 
 /// Stores the previous system state per task id which allows `Local`, `Changed` and other filters
 /// that depend on persistent state to work.
@@ -226,6 +230,7 @@ impl WakeRegistry {
             cleanup_function(world, task_to_cleanup);
         }
         let mut waker_list = bevy_platform::prelude::vec![];
+        let mut task_id_list = bevy_platform::prelude::vec![];
         while let Ok((waker, system_init, task_id)) = GLOBAL_WAKE_REGISTRY
             .0
             .get_or_init(KeyedQueues::new)
@@ -235,22 +240,25 @@ impl WakeRegistry {
             // It's okay to call this every time, because it only *actually* inits the system if the task id is new
             system_init(world, task_id);
             waker_list.push(waker);
+            task_id_list.push(task_id);
         }
-        let waker_list_len = waker_list.len();
-        let wake_park_barrier = WakeParkBarrier(
-            thread::current(),
-            Arc::new(AtomicI64::new(waker_list_len as i64)),
-        );
-        world.insert_resource(wake_park_barrier.clone());
+        let wait_group = WaitGroup::new();
+        world.init_resource::<WakeParkBarrier>();
+        for task in task_id_list {
+            world
+                .resource_mut::<WakeParkBarrier>()
+                .0
+                .lock()
+                .unwrap()
+                .insert(task, wait_group.clone());
+        }
         GLOBAL_WORLD_ACCESS.set(world, || {
             for waker in waker_list {
                 waker.wake();
             }
             // We do this because we can get spurious wakes, but we wanna ensure that
             // we stay parked until we have at least given every poll a chance to happen.
-            while wake_park_barrier.1.load(Ordering::SeqCst) > 0 {
-                thread::park();
-            }
+            wait_group.wait();
         })?;
         // Applies all the commands stored up to the world
         world.try_resource_scope(|world, mut appliers: Mut<SystemParamAppliers>| {
@@ -341,6 +349,7 @@ impl WorldAccessRegistry {
     fn get<T>(
         &self,
         world_id: WorldId,
+        task_id: AsyncTaskId,
         func: impl FnOnce(UnsafeWorldCell) -> Poll<T>,
     ) -> Option<Poll<T>> {
         // it's okay to *not* do the RaiiThing on these early returns, because that means we aren't in a state
@@ -348,30 +357,21 @@ impl WorldAccessRegistry {
         let a = self.0.get()?.read().unwrap();
         let b = a.get(&world_id)?.read().unwrap();
         let our_thing = b.as_ref()?;
-        struct UnparkOnDropGuard(WakeParkBarrier);
-        impl Drop for UnparkOnDropGuard {
-            fn drop(&mut self) {
-                let val = self.0.1.fetch_sub(1, Ordering::SeqCst) - 1;
-                // The runtime can poll us *more* often than when we call wake,
-                // this is why we use a AtomicI64 instead
-                if val == 0 {
-                    self.0.0.unpark();
-                }
-            }
-        }
         // SAFETY: WakeParkBarrier is only *read* during this section per world, so reading it
         // without an associated mutex is okay.
         // Furthermore the WakeParkBarrier cannot be queried by `async_access` because it's type
         // is not public, `async_access` cannot access `&mut World` to do a dynamic resource
         // modification.
-        let async_barrier = unsafe {
+        let _async_barrier = unsafe {
             our_thing
                 .0
                 .get_resource::<WakeParkBarrier>()
                 .unwrap()
-                .clone()
+                .0
+                .lock()
+                .unwrap()
+                .remove(&task_id)?
         };
-        let _guard = UnparkOnDropGuard(async_barrier.clone());
         // this allows us to effectively yield as if pending if the world doesn't exist rn.
         let _world = our_thing.1.try_lock().ok()?;
         // SAFETY: this is safe because we ensure no one else has access to the world.
@@ -535,7 +535,7 @@ where
         let task_id = self.4;
         let world_id = self.3.0;
 
-        match GLOBAL_WORLD_ACCESS.get(world_id, |world: UnsafeWorldCell| {
+        match GLOBAL_WORLD_ACCESS.get(world_id, task_id,|world: UnsafeWorldCell| {
             // SAFETY: We have a fake-mutex around our world, so no one else can do mutable access to it.
             let Some(system_param_queue) = (unsafe { world.get_resource::<SystemStatePool<P>>() }) else { return Poll::Pending };
             let mut system_state = match system_param_queue.0.read().unwrap().get(&task_id) {
