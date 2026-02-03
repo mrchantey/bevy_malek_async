@@ -1,5 +1,5 @@
 use crate::keyed_queues::KeyedQueues;
-use bevy_ecs::component::Tick;
+use bevy_ecs::change_detection::Tick;
 use bevy_ecs::error::ErrorContext;
 use bevy_ecs::prelude::NonSend;
 use bevy_ecs::schedule::{InternedScheduleLabel, ScheduleLabel};
