@@ -47,10 +47,10 @@ async fn fetch_example_com(
     world_id: WorldId,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
-        .user_agent("bevy-tokio-example/0.1")
+        // .user_agent("bevy-tokio-example/0.1")
         .build()?;
 
-    let resp = client.get("https://example.com/").send().await?;
+    let resp = client.get("http://example.com/").send().await?;
     let status = resp.status();
     let body = resp.text().await?;
     println!("Fetched example.com: status={status}, bytes={}", body.len());

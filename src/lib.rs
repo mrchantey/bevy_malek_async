@@ -398,6 +398,26 @@ impl CreateEcsTask for WorldId {
     }
 }
 
+/// Allows you to run an exclusive system (one that takes `&mut World`) from any arbitrary async
+/// runtime. Like [`async_access`], calls will never return immediately and will always start
+/// `Pending` at least once.
+pub async fn async_exclusive_access<Func, Out>(
+    world_id: WorldId,
+    schedule: impl ScheduleLabel,
+    ecs_access: Func,
+) -> Out
+where
+    Func: FnOnce(&mut World) -> Out,
+{
+    PendingExclusiveCall::<Func, Out> {
+        func: Some(ecs_access),
+        info: (world_id, schedule.intern()),
+        task_id: AsyncTaskId::new().unwrap(),
+        _marker: PhantomData,
+    }
+    .await
+}
+
 /// Allows you to access the ECS from any arbitrary async runtime.
 /// Calls will never return immediately and will always start Pending at least once.
 /// Call this with the same `EcsTask` to persist `SystemParams` like `Local` or `Changed`
@@ -599,6 +619,50 @@ where
                     Ok(_) => {}
                     // This should never panic because we never `close` our concurrent queues and
                     // the concurrent queue here is unbounded.
+                    Err(_) => unreachable!(),
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+struct PendingExclusiveCall<Func, Out> {
+    func: Option<Func>,
+    info: (WorldId, InternedScheduleLabel),
+    task_id: AsyncTaskId,
+    _marker: PhantomData<Out>,
+}
+
+impl<Func, Out> Unpin for PendingExclusiveCall<Func, Out> {}
+
+impl<Func, Out> Future for PendingExclusiveCall<Func, Out>
+where
+    Func: FnOnce(&mut World) -> Out,
+{
+    type Output = Out;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn noop_init(_world: &mut World, _task_id: AsyncTaskId) {}
+
+        let task_id = self.task_id;
+        let world_id = self.info.0;
+
+        match GLOBAL_WORLD_ACCESS.get(world_id, task_id, |world: UnsafeWorldCell| {
+            // SAFETY: We have exclusive access via the fake-mutex in WorldAccessRegistry::get,
+            // and the UnsafeWorldCell was created via World::as_unsafe_world_cell().
+            let world_mut = unsafe { world.world_mut() };
+            let out = self.as_mut().func.take().unwrap()(world_mut);
+            Poll::Ready(out)
+        }) {
+            Some(poll) => poll,
+            None => {
+                match GLOBAL_WAKE_REGISTRY
+                    .0
+                    .get_or_init(KeyedQueues::new)
+                    .try_send(&self.info, (cx.waker().clone(), noop_init, task_id))
+                {
+                    Ok(_) => {}
                     Err(_) => unreachable!(),
                 }
                 Poll::Pending
